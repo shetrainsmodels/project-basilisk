@@ -4,7 +4,7 @@ import copy
 import torch
 import torch.nn as nn
 
-def masking_algorithm_targets(tokens, mask_ratio: float = 0.25, t_l: int = 3, generator = None)-> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]: 
+def masking_algorithm_targets(tokens, mask_ratio: float = 0.33, t_l: int = 3, generator = None)-> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]: 
     B, Lw, _ =  tokens.shape # [B, 18, 384]
 
     # ---- SPAN: contiguous timestep t_l = 3, mask shape [B, Lw] ----
@@ -141,7 +141,7 @@ class MambaJEPA(nn.Module):
     Gradient frozen and not optimizer
     Updated by EMA of Context Encoder weights
     '''
-    def __init__(self, config, mask_ratio = 0.25, t_l = 3, use_pe: bool = False, initializer_cfg=None, device=None, dtype=None) -> None:
+    def __init__(self, config, mask_ratio = 0.33, t_l = 3, use_pe: bool = False, initializer_cfg=None, device=None, dtype=None) -> None:
         super().__init__()
         self.config = config
         self.mask_ratio = mask_ratio
@@ -155,8 +155,10 @@ class MambaJEPA(nn.Module):
         if use_pe:
             self.pe = nn.Parameter(torch.zeros(1, config.n_tokens, config.d_model, device=device, dtype=dtype))
             nn.init.trunc_normal_(self.pe, std = 0.02)
+            self.register_buffer("pe_target", self.pe.detach().clone()) # copy pe of target encoder 
         else:
             self.pe = None
+            self.pe_target = None
         #predictor
         self.predictor = PredictorTransformer(config)
 
@@ -165,6 +167,8 @@ class MambaJEPA(nn.Module):
     def update_target_encoder(self, momentum: float) -> None:
         for context_param, target_param in zip(self.context_encoder.parameters(), self.target_encoder.parameters()):
             target_param.mul_(momentum).add_(context_param, alpha=1.0 - momentum)
+        if self.use_pe:
+            self.pe_target.mul_(momentum).add_(self.pe, alpha=1.0 - momentum)
 
     def forward(self, input_sensor1):
         self.target_encoder.eval() # 
@@ -172,7 +176,7 @@ class MambaJEPA(nn.Module):
             tokens_target = self.target_encoder.tokenize(input_sensor1)
             # ADD PE
             if self.use_pe:
-                tokens_target = tokens_target + self.pe
+                tokens_target = tokens_target + self.pe_target
             target_embeddings = self.target_encoder.encode_tokens(tokens_target) # [B, 18, 384]
 
         tokens_context = self.context_encoder.tokenize(input_sensor1)

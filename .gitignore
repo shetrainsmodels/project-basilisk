@@ -9,3 +9,7 @@ venv/
 *.ckpt
 
 DATASETS/
+data/
+logs/
+JEPA_models_pt/
+results_json/

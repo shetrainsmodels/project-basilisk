@@ -6,7 +6,6 @@ import math
 import copy
 from functools import partial
 
-from mamba_ssm.modules.mamba_simple import Mamba
 from mamba_ssm.modules.mamba2 import Mamba2
 import importlib
 import mamba_ssm.modules.block
