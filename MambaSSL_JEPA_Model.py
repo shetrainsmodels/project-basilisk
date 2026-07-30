@@ -141,7 +141,7 @@ class MambaJEPA(nn.Module):
     Gradient frozen and not optimizer
     Updated by EMA of Context Encoder weights
     '''
-    def __init__(self, config, mask_ratio = 0.33, t_l = 3, use_pe: bool = False, initializer_cfg=None, device=None, dtype=None) -> None:
+    def __init__(self, config, mask_ratio = 0.33, t_l = 3, use_pe: bool = False, drop: bool = False, initializer_cfg=None, device=None, dtype=None) -> None:
         super().__init__()
         self.config = config
         self.mask_ratio = mask_ratio
@@ -152,6 +152,7 @@ class MambaJEPA(nn.Module):
         self.target_encoder = copy.deepcopy(self.context_encoder) #same arch and weights, mandatory
         self.target_encoder.requires_grad_(False) #no grad flow in T.Encoder
         self.use_pe = use_pe
+        self.drop = drop
         if use_pe:
             self.pe = nn.Parameter(torch.zeros(1, config.n_tokens, config.d_model, device=device, dtype=dtype))
             nn.init.trunc_normal_(self.pe, std = 0.02)
@@ -160,7 +161,7 @@ class MambaJEPA(nn.Module):
             self.pe = None
             self.pe_target = None
         #predictor
-        self.predictor = PredictorTransformer(config)
+        self.predictor = PredictorTransformer(config, drop = drop)
 
     #  EMA UPDATE FOR TARGET ENCODER
     @torch.no_grad()
@@ -184,6 +185,9 @@ class MambaJEPA(nn.Module):
         # ADD PE
         if self.use_pe:
             context_input = context_input + self.pe
+        # ADD DROPPING MECHANISM
+        if self.drop:
+            context_input = (context_input[~mask_targets]).view(mask_targets.size(0), -1, context_input.size(2))
         context_embeddings = self.context_encoder.encode_tokens(context_input) 
 
         # Predictor
@@ -245,7 +249,7 @@ class Block_Attn(nn.Module):
 
 
 class PredictorTransformer(nn.Module):
-    def __init__(self, config, n_blocks = 4, num_heads = 6) -> None:
+    def __init__(self, config, n_blocks = 4, num_heads = 6, drop: bool = False) -> None:
         super().__init__()
         self.config = config
         self.project_in = nn.Linear(config.d_model, config.d_model//2)
@@ -256,13 +260,18 @@ class PredictorTransformer(nn.Module):
 
         self.blocks = nn.ModuleList([Block_Attn(config, num_heads) for _ in range(n_blocks)])
         self.layer_norm = nn.LayerNorm(config.d_model//2) 
+        self.drop = drop
 
 
     def forward(self, masks, context_embeddings, mask_targets):
         # ---- Take visible context and expand 2B ----
         visible_index = (~mask_targets).nonzero(as_tuple = False)[:, 1].view(context_embeddings.size(0), -1) #what is visible [B, 12]
-        visible_index_full = visible_index.unsqueeze(-1).expand(-1, -1, context_embeddings.size(-1)) # [B, 12, 384]
-        context_emb_visible = torch.gather(context_embeddings, 1, visible_index_full) # [B, 12, 384]
+        if not self.drop:
+            visible_index_full = visible_index.unsqueeze(-1).expand(-1, -1, context_embeddings.size(-1)) # [B, 12, 384]
+            context_emb_visible = torch.gather(context_embeddings, 1, visible_index_full) # [B, 12, 384]
+        else:
+            context_emb_visible = context_embeddings
+
         context_emb_expanded = context_emb_visible.repeat(len(masks), 1, 1) # n of tensors in my masks list [2B, 12, 384]
         # ---- Build Target Blocks, Learnable mask token and PE expand 2B ----
         target_blocks = torch.cat(masks, dim = 0) # [2B, 3]
