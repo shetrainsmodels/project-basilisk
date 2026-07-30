@@ -51,6 +51,8 @@ def masking_algorithm_targets(tokens, mask_ratio: float = 0.33, t_l: int = 3, ge
 
 @dataclass
 class HARMambaConfig:
+    conv_kernel: int = 5
+    conv_stride: int = 5
     d_model: int = 384
     num_sensor_features: int = 45
     d_intermediate: int = 512
@@ -76,8 +78,8 @@ class MambaEncoderModel(nn.Module):
         fused_add_norm = config.fused_add_norm
         factory_kwargs = {"device": device, "dtype": dtype}
 
-        self.kernel_size = 5
-        self.stride = 5
+        self.kernel_size = config.conv_kernel
+        self.stride = config.conv_stride
         self.padding = 0
         
         # HAR INPUT AND BLOCKS
@@ -113,6 +115,7 @@ class MambaEncoderModel(nn.Module):
         Sensor Input -> [Batch_size, Length_window, num_sensor_features]
         Output ->  [B, L, d_model]
         '''
+        assert input_sensor1.size(1) % self.stride == 0, f"window lenght {input_sensor1.size(1)} not divisible by stride {self.stride}"
         x = input_sensor1.transpose(1, 2).contiguous()  # [B, L, Ft] -> [B, Ft, L]
         x = self.convolutional_input(x) # [B, d_model, L]
         x = x.transpose(1, 2)  # [B, d_model, L] -> [B, L, d_model]
@@ -141,7 +144,7 @@ class MambaJEPA(nn.Module):
     Gradient frozen and not optimizer
     Updated by EMA of Context Encoder weights
     '''
-    def __init__(self, config, mask_ratio = 0.33, t_l = 3, use_pe: bool = False, drop: bool = False, initializer_cfg=None, device=None, dtype=None) -> None:
+    def __init__(self, config, mask_ratio = 0.33, t_l = 3, use_pe: bool = False, drop: bool = False, recon: bool = False, initializer_cfg=None, device=None, dtype=None) -> None:
         super().__init__()
         self.config = config
         self.mask_ratio = mask_ratio
@@ -162,6 +165,8 @@ class MambaJEPA(nn.Module):
             self.pe_target = None
         #predictor
         self.predictor = PredictorTransformer(config, drop = drop)
+        self.recon = recon
+        self.decoder = DecoderModel(config, device=device, dtype=dtype) if recon else None
 
     #  EMA UPDATE FOR TARGET ENCODER
     @torch.no_grad()
@@ -196,6 +201,7 @@ class MambaJEPA(nn.Module):
         blocks_cat = torch.cat(target_blocks, dim = 0) # [2B, 3]
         index = blocks_cat.unsqueeze(-1).expand(-1, -1, target_embeddings.size(-1))
         targets = torch.gather(targets_emb_2B, 1, index) 
+
         return target_embeddings, targets, context_embeddings, mask_targets, target_blocks, predictions
 
 class MLP(nn.Module):
@@ -299,6 +305,30 @@ class PredictorTransformer(nn.Module):
         x = self.project_out(x) # [B, 3, 384]
         return x
         
+class DecoderModel(nn.Module):
+    def __init__(self, config, device=None, dtype=None) -> None:
+        super().__init__()
+
+        self.config = config
+        d_model = config.d_model
+        factory_kwargs = {"device": device, "dtype": dtype}
+        
+        self.decoder = nn.Sequential(
+        nn.Linear(d_model, d_model, **factory_kwargs),
+        nn.GELU(),
+        nn.LayerNorm(d_model, **factory_kwargs),
+        nn.Linear(d_model, self.config.conv_stride * self.config.num_sensor_features, **factory_kwargs)
+        )
+          
+    def forward(self, hidden_states) -> torch.Tensor:
+        '''
+        Input -> hidden_states = [B, L, d_model]
+        Output -> Reconstructed signal [B, L*5, num_sensor_features]
+        '''
+        B, L, _ = hidden_states.shape
+        out = self.decoder(hidden_states)                   # [B, L, 5*num_sensor_features]
+        out = out.view(B, L, self.config.conv_stride, -1).reshape(B, L * self.config.conv_stride, -1)   # each token -> its 5 timesteps
+        return out   
 
 class MambaDownstreamClassifier(nn.Module):
     def __init__(self, config, num_classes: int, initializer_cfg=None, device=None, dtype=None) -> None:

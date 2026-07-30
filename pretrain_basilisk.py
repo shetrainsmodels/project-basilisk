@@ -86,7 +86,9 @@ for seed in [42, 58, 7, 128, 92]:
     #  ----------- TRAINING SETUP -----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
-    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3, use_pe = True, drop = True)
+    recon = True
+    lam = 0.1
+    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3, use_pe = False, drop = True, recon = recon)
     model.to(device, non_blocking = True)
     # ----------------------
     num_epochs = 35
@@ -132,6 +134,7 @@ for seed in [42, 58, 7, 128, 92]:
             epoch_start = time.time()
             model.train()
             total_loss = 0.0
+            total_recon = 0.0
             total_samples = 0
 
             loop = tqdm(train_loader, desc = f"Epoch {epoch+1}/{num_epochs}")
@@ -139,8 +142,20 @@ for seed in [42, 58, 7, 128, 92]:
                 x_batch = x_batch.to(device, non_blocking = True)
 
                 optimizer.zero_grad()
-                _, targets, _, _, _, predictions = model(x_batch)
+                _, targets, _, _, target_blocks, predictions = model(x_batch)
                 loss = criterion(predictions, targets)
+
+                # RECONSTRUCTION
+                if recon:
+                    reconstruction = model.decoder(predictions)
+                    blocks_cat = torch.cat(target_blocks, dim = 0) # List of 2 tensors -> 2 * [B, 3]
+                    steps = blocks_cat.unsqueeze(-1) * config.conv_stride + torch.arange(config.conv_stride, device = x_batch.device) # [2B, 3, 5]
+                    steps = steps.reshape(blocks_cat.size(0), -1) # [2B, 15]
+                    x_batch_2b = x_batch.repeat(len(target_blocks), 1, 1) # [2B, 90, 45]
+                    raw_chunks = torch.gather(x_batch_2b, 1, steps.unsqueeze(-1).expand(-1, -1, config.num_sensor_features))
+                    recon_loss = criterion(reconstruction, raw_chunks)
+                    loss = loss + lam * recon_loss
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm = 1.0)
                 optimizer.step()
@@ -151,10 +166,13 @@ for seed in [42, 58, 7, 128, 92]:
 
                 bsize = x_batch.size(0)
                 total_loss += loss.item() * bsize
+                if recon:
+                    total_recon += recon_loss.item() * bsize
                 total_samples += bsize
-                loop.set_postfix(loss = f"{total_loss/total_samples:.4f}")
+                loop.set_postfix(loss = f"{total_loss/total_samples:.4f}", recon = f"{total_recon/total_samples:.4f}")
 
             train_loss = total_loss / total_samples
+            train_recon = total_recon / total_samples
             val_loss, emb_std, mean_cos = validate_model_PRETRAIN_JEPA(model, val_loader, device, criterion)
 
             epoch_time = time.time() - epoch_start
@@ -165,8 +183,8 @@ for seed in [42, 58, 7, 128, 92]:
                 "emb_std": float(emb_std),
                 "mean_cos": float(mean_cos)
             })
-            print(f"\nEpoch: {epoch+1}/{num_epochs} | tr_Loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s")
-            log_file.write(f"Epoch: {epoch+1}/{num_epochs} | tr_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s\n")
+            print(f"\nEpoch: {epoch+1}/{num_epochs} | tr_Loss: {train_loss:.4f} | tr_recon: {train_recon:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s")
+            log_file.write(f"Epoch: {epoch+1}/{num_epochs} | tr_loss: {train_loss:.4f} | tr_recon: {train_recon:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s\n")
             log_file.flush()
 
             if val_loss < best_val_loss - 1e-12:
