@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=pretrain_basilisk
+#SBATCH --job-name=TRAIN_JEPA_mamba_OPP
 #SBATCH --partition=gpuq
 #SBATCH --qos=gpu
 #SBATCH --gres=gpu:A100.80gb:1
@@ -10,9 +10,12 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
+
+set -euo pipefail
+
 if [ -z "$1" ] || [ -z "$2" ]; then
-	echo "Usage: sbatch pretrain_basilisk.slurm <DATASET_NAME> <FOLD_ID>"
-	echo "Example: sbatch pretrain_basilisk.slurm OPP 1"
+	echo "Usage: sbatch train_downstream_basilisk.slurm <DATASET_NAME> <FOLD_ID>"
+	echo "Example: sbatch train_downstream_basilisk.slurm OPP 1"
 	exit 1
 fi
 
@@ -23,9 +26,9 @@ echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 nvidia-smi
 
 source /home/kmercad/myenv/bin/activate
-cd $SLURM_SUBMIT_DIR
+cd "$SLURM_SUBMIT_DIR"
 
-python pretrain_basilisk.py --dataset "$1" --fold "$2"
+python train_downstream_basilisk.py --dataset "$1" --fold "$2"
 
 JOB_END=$(date +%s)
 ELAPSE=$((JOB_END-JOB_START))

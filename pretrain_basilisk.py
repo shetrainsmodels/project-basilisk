@@ -18,6 +18,7 @@ from utils import set_seed
 import argparse
 from torch.profiler import profile, ProfilerActivity
 import time
+import math
 try:
     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
@@ -30,7 +31,7 @@ import random
 print(f"Mamba version: {mamba_ssm.__version__}")
 print(f"Path: {mm.__file__}")
 
-parser = argparse.ArgumentParser(description = "supervised_mamba")
+parser = argparse.ArgumentParser(description = "J_mamba")
 parser.add_argument("--dataset", type = str, required = True)
 parser.add_argument("--fold", type = int, required = True)
 args = parser.parse_args()
@@ -85,10 +86,11 @@ for seed in [42, 58, 7, 128, 92]:
     #  ----------- TRAINING SETUP -----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
-    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3)
+    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3, uses_pe = True)
     model.to(device, non_blocking = True)
     # ----------------------
-    num_epochs = 50
+    num_epochs = 35
+    warmup_Epochs = 5
     lr = 0.0006
     patience = 8
     criterion = nn.SmoothL1Loss()
@@ -101,7 +103,15 @@ for seed in [42, 58, 7, 128, 92]:
             no_decay.append(p)
         else:
             decay.append(p)
-    optimizer = torch.optim.AdamW([{"params": decay,    "weight_decay": 1e-4}, {"params": no_decay, "weight_decay": 0.0}], lr = lr)
+    #### Scheduler ####
+    def lr_lambda(epoch):
+        if epoch < warmup_Epochs:
+            return (epoch + 1)/warmup_Epochs
+        progress = (epoch - warmup_Epochs)/max(1, num_epochs - warmup_Epochs)
+        min_ratio = 1e-6 / lr
+        return min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+    optimizer = torch.optim.AdamW([{"params": decay, "weight_decay": 1e-4}, {"params": no_decay, "weight_decay": 0.0}], lr = lr)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     # EMA momentum schedule: 0.996 -> 1.0 linearly over all steps (I-JEPA style)
     total_steps = num_epochs * len(train_loader)
     m_start, m_end = 0.996, 1.0
@@ -169,6 +179,7 @@ for seed in [42, 58, 7, 128, 92]:
                 if bad_epochs >= patience:
                     print(f"\nEarly stopping at epoch {epoch + 1} | Best Validation Loss: {best_val_loss:.4f}")
                     break
+            scheduler.step()
 
         if best_state is not None:
             torch.save(best_state, model_name)

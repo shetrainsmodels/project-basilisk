@@ -291,7 +291,7 @@ class PredictorTransformer(nn.Module):
         return x
         
 
-'''class MambaDownstreamClassifier(nn.Module):
+class MambaDownstreamClassifier(nn.Module):
     def __init__(self, config, num_classes: int, initializer_cfg=None, device=None, dtype=None) -> None:
         super().__init__()
         
@@ -306,18 +306,20 @@ class PredictorTransformer(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
 
         self.classifier = nn.Sequential(
-            nn.Linear(d_model, d_model, **factory_kwargs),
-            nn.ReLU(),
-            #nn.LayerNorm(d_model, **factory_kwargs),
-            nn.Dropout(0.2),
+            #TEST1: MLP PROBE
             nn.Linear(d_model, num_classes, **factory_kwargs)
+            #nn.Linear(d_model, d_model, **factory_kwargs),
+            #nn.ReLU(),
+            #nn.LayerNorm(d_model, **factory_kwargs),
+            #nn.Dropout(0.2),
+            #nn.Linear(d_model, num_classes, **factory_kwargs)
         )
 
     def forward(self, x):
         hidden_states = self.encoder(x) # [B, L, d_model]
         pooled_features = hidden_states.mean(dim=1)   # [B, d_model]
         logits = self.classifier(pooled_features)
-        return logits'''
+        return logits
 
 
 

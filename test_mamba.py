@@ -28,7 +28,26 @@ def test_model(model, test_loader, device):
     conf_matrix = confusion_matrix(all_labels, all_preds)
     return acc, report, f1, conf_matrix
 
-
+def save_json(dataset, fold, seed, seed_result) -> None:
+    '''
+    Saves the results of a single seed run to a JSON file for the given fold.
+    Results are stored under "runs" keyed by seed for easy lookup.
+    '''
+    os.makedirs("results_json", exist_ok = True)
+    json_path = os.path.join("results_json", f"{dataset}_fold{fold}_results.json")
+    # check if json file exists.
+    if os.path.exists(json_path):
+        with open(json_path, "r") as f:
+            json_info = json.load(f)
+    else:
+        json_info = {
+            "fold": int(fold),
+            "runs": {}
+        }
+    # add seed results into the dict
+    json_info["runs"][f"seed_{seed}"] = seed_result
+    with open(json_path, "w") as f:
+        json.dump(json_info, f, indent = 4)
     
             
         
