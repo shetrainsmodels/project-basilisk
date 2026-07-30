@@ -86,7 +86,7 @@ for seed in [42, 58, 7, 128, 92]:
     #  ----------- TRAINING SETUP -----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
-    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3, uses_pe = True)
+    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3, use_pe = True)
     model.to(device, non_blocking = True)
     # ----------------------
     num_epochs = 35

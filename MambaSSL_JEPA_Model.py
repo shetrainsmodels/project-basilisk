@@ -295,6 +295,7 @@ class MambaDownstreamClassifier(nn.Module):
     def __init__(self, config, num_classes: int, initializer_cfg=None, device=None, dtype=None) -> None:
         super().__init__()
         
+        self.pe = None
         self.encoder = MambaEncoderModel(
             config=config,
             initializer_cfg=initializer_cfg,
@@ -316,7 +317,10 @@ class MambaDownstreamClassifier(nn.Module):
         )
 
     def forward(self, x):
-        hidden_states = self.encoder(x) # [B, L, d_model]
+        x = self.encoder.tokenize(x)
+        if self.pe is not None:
+            x = x + self.pe
+        hidden_states = self.encoder.encode_tokens(x) # [B, L, d_model]
         pooled_features = hidden_states.mean(dim=1)   # [B, d_model]
         logits = self.classifier(pooled_features)
         return logits

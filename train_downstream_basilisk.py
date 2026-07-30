@@ -52,7 +52,9 @@ def load_pretrained_encoder(model, device, fold, seed):
     state = torch.load(checkpoint_path, map_location = device, weights_only=True)
     encoder_state = {k.replace("target_encoder.", "", 1): v for k,v in state.items() if k.startswith("target_encoder.")}
     model.encoder.load_state_dict(encoder_state, strict = True)
-    print("JEPA weights loaded")
+    if "pe_target" in state:
+        model.pe = state["pe_target"].to(device)
+    print("JEPA weights loaded with PE:", model.pe is not None)
 #  ----------------------------------------------------- VALIDATION -----------------------------------------------------
 @torch.no_grad()
 def validate_model(model, val_loader, device, criterion):
