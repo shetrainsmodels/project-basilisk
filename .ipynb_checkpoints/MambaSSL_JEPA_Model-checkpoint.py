@@ -347,7 +347,6 @@ class MambaDownstreamClassifier(nn.Module):
 
         self.classifier = nn.Sequential(
             #TEST1: MLP PROBE
-            nn.LayerNorm(d_model, **factory_kwargs),
             nn.Linear(d_model, num_classes, **factory_kwargs)
             #nn.Linear(d_model, d_model, **factory_kwargs),
             #nn.ReLU(),

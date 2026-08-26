@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=TRAIN_JEPA_mamba_OPP
-#SBATCH --partition=gpuq
+#SBATCH --partition=contrib-gpuq
 #SBATCH --qos=gpu
 #SBATCH --gres=gpu:A100.80gb:1
 #SBATCH --ntasks=1

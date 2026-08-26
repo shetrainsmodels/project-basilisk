@@ -85,6 +85,118 @@ def validate_model(model, val_loader, device, criterion):
 
     report = classification_report(all_labels, all_preds, target_names = ["STAND", "WALK", "SIT", "LIE"])
     return total_loss / total_samples, total_correct / total_samples, report
+# --------------------------------
+@torch.no_grad()
+def embed_and_rank(model, loader, device, tag):
+    model.eval()
+
+    Z = []
+    # --------------------------------------------------
+    # 1. Extract one embedding per IMU window
+    # --------------------------------------------------
+    for x_batch, _ in loader:
+        x_batch = x_batch.to(device, non_blocking=True)
+
+        # Raw IMU -> tokens
+        t = model.encoder.tokenize(x_batch)
+
+        # Add positional embedding if used
+        if model.pe is not None:
+            if model.pe.ndim == 3:
+                pe = model.pe[:, :t.shape[1]]
+            else:
+                pe = model.pe[:t.shape[1]]
+
+            t = t + pe.to(device=t.device, dtype=t.dtype)
+
+        # Mamba encoder
+        h = model.encoder.encode_tokens(t)
+
+        # Mean pool over sequence/time dimension
+        # [B, T, D] -> [B, D]
+        z = h.mean(dim=1)
+
+        Z.append(z.float().cpu())
+    # --------------------------------------------------
+    # 2. Basic checks
+    # --------------------------------------------------
+    if not Z:
+        raise ValueError("Loader is empty.")
+
+    Z = torch.cat(Z, dim=0)
+
+    if len(Z) < 2:
+        raise ValueError("At least two windows are required.")
+
+    # --------------------------------------------------
+    # 3. Center embeddings
+    # --------------------------------------------------
+    Zc = Z - Z.mean(dim=0, keepdim=True)
+    # --------------------------------------------------
+    # 4. Singular values / variance spectrum
+    # --------------------------------------------------
+    sv = torch.linalg.svdvals(Zc)
+
+    # Variance associated with each singular direction
+    energy = sv.square()
+    total_energy = energy.sum()
+
+    if total_energy.item() <= 1e-12:
+        # All embeddings are effectively identical
+        eff = 0.0
+        d95 = 0
+        d99 = 0
+
+    else:
+        # Fraction of representation variance
+        # explained by each singular direction
+        p = energy / total_energy
+
+        # Effective rank
+        q = sv / (sv.sum() + 1e-12)
+        entropy = -(q * q.clamp_min(1e-12).log()).sum()
+        eff = torch.exp(entropy).item()
+
+        # Cumulative explained variance
+        ev = torch.cumsum(p, dim=0)
+
+        # Number of dimensions required for
+        # 95% and 99% of variance
+        d95 = int((ev < 0.95).sum().item()) + 1
+        d99 = int((ev < 0.99).sum().item()) + 1
+
+    # --------------------------------------------------
+    # 5. Mean cosine similarity between different windows
+    # --------------------------------------------------
+    Zn = F.normalize(Z, dim=1, eps=1e-12)
+
+    n = len(Zn)
+
+    # Equivalent to computing all pairwise cosine
+    # similarities, but WITHOUT creating an NxN matrix.
+    sum_vec = Zn.sum(dim=0)
+
+    all_dot_products = sum_vec.square().sum()
+    self_dot_products = Zn.square().sum()
+
+    mcos = (
+        (all_dot_products - self_dot_products)
+        / (n * (n - 1))
+    ).item()
+
+    # --------------------------------------------------
+    # 6. Print diagnostics
+    # --------------------------------------------------
+    print(
+        f"[RANK:{tag}] "
+        f"N={Z.shape[0]} "
+        f"D={Z.shape[1]} "
+        f"eff_rank={eff:.2f} "
+        f"d95={d95} "
+        f"d99={d99} "
+        f"mean_cos={mcos:.4f}"
+    )
+    return eff
 #  ----------------------------------------------------------------------------------------------------------------------
 #  ---------------------------------------------------- LOSO TRAINING ---------------------------------------------------
 for seed in [42, 58, 7, 128, 92]: 
@@ -102,10 +214,12 @@ for seed in [42, 58, 7, 128, 92]:
     lr = 2e-4 
     
     # LOAD PRETRAINED ENCODER
+    embed_and_rank(model, test_loader, device, f"randinit_f{args.fold}_s{seed}")
     load_pretrained_encoder(model, device, args.fold, seed)
     # FREEZE encoder 
     for param in model.encoder.parameters():
         param.requires_grad = False
+    embed_and_rank(model, test_loader, device, f"JEPA_f{args.fold}_s{seed}")
         
     #WCE
     #y_train_encoded = label_encoder.transform(np.asarray(y_windows))

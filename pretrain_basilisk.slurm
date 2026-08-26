@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=pretrain_basilisk
-#SBATCH --partition=gpuq
+#SBATCH --partition=contrib-gpuq
 #SBATCH --qos=gpu
 #SBATCH --gres=gpu:A100.80gb:1
 #SBATCH --ntasks=1

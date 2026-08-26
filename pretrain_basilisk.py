@@ -1,3 +1,4 @@
+from pyexpat import model
 import os, sys
 from MambaSSL_JEPA_Model import MambaJEPA, HARMambaConfig
 from data.OPPORTUNITY_data import load_OPP_loco_data, data_split_OPP, make_loaders_OPP
@@ -78,6 +79,22 @@ def validate_model_PRETRAIN_JEPA(model, val_loader, device, criterion):
  
     return total_loss / total_samples, sum(emb_stds) / len(emb_stds), sum(mean_coss) / len(mean_coss)
 
+# -------------------------------------------- GRAD ANALYSIS ---------------------------------------------------
+def get_grad_vector(jepa_loss, raw_loss, layer_param, lam):
+    layer_param = [p for p in layer_param if p.requires_grad]
+    grad_jepa = torch.autograd.grad(jepa_loss, layer_param, retain_graph = True, allow_unused = True)
+    grad_raw = torch.autograd.grad(raw_loss, layer_param, retain_graph = True, allow_unused = True)
+    grad_jepa = torch.cat([(torch.zeros_like(p) if g is None else g).flatten() for p, g in zip(layer_param, grad_jepa)])
+    grad_raw = torch.cat([(torch.zeros_like(p) if g is None else g).flatten() for p, g in zip(layer_param, grad_raw)])
+
+    norm_jepa = grad_jepa.norm().item()
+    norm_raw = grad_raw.norm().item()
+    effective_raw_norm = lam * norm_raw
+
+    ratio_l = norm_jepa/(effective_raw_norm + 1e-8)  # STRENGHT
+    cos = torch.nn.functional.cosine_similarity(grad_jepa, grad_raw, dim = 0, eps = 1e-8) # SIMILARITY
+
+    return ratio_l, cos.item()
 #  ---------------------------------------------------- TRAINING ---------------------------------------------------
 for seed in [42, 58, 7, 128, 92]:
     g = set_seed(seed)
@@ -87,8 +104,8 @@ for seed in [42, 58, 7, 128, 92]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
     recon = True
-    lam = 0.1
-    model = MambaJEPA(config, mask_ratio = 1/3, t_l = 3, use_pe = False, drop = True, recon = recon)
+    lam = 0.3
+    model = MambaJEPA(config, mask_ratio = 0.33, t_l = 3, use_pe = False, drop = True, recon = recon)
     model.to(device, non_blocking = True)
     # ----------------------
     num_epochs = 35
@@ -105,6 +122,16 @@ for seed in [42, 58, 7, 128, 92]:
             no_decay.append(p)
         else:
             decay.append(p)
+
+    GROUPS = {
+    "stem": list(model.context_encoder.convolutional_input.parameters()) + list(model.context_encoder.LN_layer.parameters()),
+    "early": [p for p in model.context_encoder.backbone.layers[0:3] for p in p.parameters()],
+    "mid":   [p for p in model.context_encoder.backbone.layers[3:6] for p in p.parameters()],
+    "late":  [p for p in model.context_encoder.backbone.layers[6:8] for p in p.parameters()] + list(model.context_encoder.backbone.norm_f.parameters()),
+    "all":   list(model.context_encoder.parameters())     
+    }
+    g_ratio_epoch = {}
+    g_cos_epoch = {}
     #### Scheduler ####
     def lr_lambda(epoch):
         if epoch < warmup_Epochs:
@@ -136,6 +163,7 @@ for seed in [42, 58, 7, 128, 92]:
             total_loss = 0.0
             total_recon = 0.0
             total_samples = 0
+            grad_stat = {name: {"ratio": [], "cos": []} for name in GROUPS}
 
             loop = tqdm(train_loader, desc = f"Epoch {epoch+1}/{num_epochs}")
             for _, (x_batch, _) in enumerate(loop):
@@ -154,7 +182,11 @@ for seed in [42, 58, 7, 128, 92]:
                     x_batch_2b = x_batch.repeat(len(target_blocks), 1, 1) # [2B, 90, 45]
                     raw_chunks = torch.gather(x_batch_2b, 1, steps.unsqueeze(-1).expand(-1, -1, config.num_sensor_features))
                     recon_loss = criterion(reconstruction, raw_chunks)
-                    loss = loss + lam * recon_loss
+                    jepa = loss
+                    loss = jepa + lam * recon_loss
+                    for name, layer_level in GROUPS.items():
+                        ratio_l, cos = get_grad_vector(jepa, recon_loss, layer_level, lam)
+                        grad_stat[name]["ratio"].append(ratio_l);  grad_stat[name]["cos"].append(cos)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm = 1.0)
@@ -173,6 +205,10 @@ for seed in [42, 58, 7, 128, 92]:
 
             train_loss = total_loss / total_samples
             train_recon = total_recon / total_samples
+            for name in GROUPS.keys():
+                g_ratio_epoch[name] = sum(grad_stat[name]["ratio"]) / max(1, len(grad_stat[name]["ratio"]))
+                g_cos_epoch[name] = sum(grad_stat[name]["cos"]) / max(1, len(grad_stat[name]["cos"]))
+            g_str = " | ".join(f"{n}: r={g_ratio_epoch[n]:.3f} c={g_cos_epoch[n]:.3f}" for n in GROUPS)
             val_loss, emb_std, mean_cos = validate_model_PRETRAIN_JEPA(model, val_loader, device, criterion)
 
             epoch_time = time.time() - epoch_start
@@ -181,10 +217,12 @@ for seed in [42, 58, 7, 128, 92]:
                 "tr_loss": float(train_loss),
                 "val_loss": float(val_loss),
                 "emb_std": float(emb_std),
-                "mean_cos": float(mean_cos)
+                "mean_cos": float(mean_cos),
+                "grad_ratio": dict(g_ratio_epoch),
+                "grad_cos": dict(g_cos_epoch)
             })
-            print(f"\nEpoch: {epoch+1}/{num_epochs} | tr_Loss: {train_loss:.4f} | tr_recon: {train_recon:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s")
-            log_file.write(f"Epoch: {epoch+1}/{num_epochs} | tr_loss: {train_loss:.4f} | tr_recon: {train_recon:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s\n")
+            print(f"\nEpoch: {epoch+1}/{num_epochs} | tr_Loss: {train_loss:.4f} | tr_recon: {train_recon:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s | g_str: {g_str}")
+            log_file.write(f"Epoch: {epoch+1}/{num_epochs} | tr_loss: {train_loss:.4f} | tr_recon: {train_recon:.4f} | val_loss: {val_loss:.4f} | emb_std: {emb_std:.4f} | mean_cos: {mean_cos:.4f} | epoch_time: {epoch_time:.2f}s | g_str: {g_str}\n")
             log_file.flush()
 
             if val_loss < best_val_loss - 1e-12:
