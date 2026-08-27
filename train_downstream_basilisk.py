@@ -36,9 +36,11 @@ parser = argparse.ArgumentParser(description = "supervised_mamba")
 parser.add_argument("--dataset", type = str, required = True)
 parser.add_argument("--fold", type = int, required = True)
 parser.add_argument("--lam", type = float, required = True)
+parser.add_argument("--w_per_class", type = str, default = "all")
 args = parser.parse_args()
-RUN = f"lam{args.lam:g}"
-os.makedirs(f"JEPA_models_pt/{RUN}", exist_ok = True)
+RUN = f"lam{args.lam:g}"                                                    # pretrained-encoder folder (shared by all label fractions)
+OUT = RUN if args.w_per_class == "all" else f"{RUN}_n{int(args.w_per_class)}"   # output tag: results/logs/probe .pt
+os.makedirs(f"JEPA_models_pt/{OUT}", exist_ok = True)
 os.makedirs("logs", exist_ok = True)
 if args.dataset == "OPP":
     if args.fold in [1, 2, 3, 4]:
@@ -203,9 +205,24 @@ def embed_and_rank(model, loader, device, tag):
     return eff
 #  ----------------------------------------------------------------------------------------------------------------------
 #  ---------------------------------------------------- LOSO TRAINING ---------------------------------------------------
+def subsample_per_class(X_windows, y_windows, w_per_class, seed):
+    rng = np.random.default_rng(seed)   # own RNG: depends only on seed -> same windows for every encoder
+    keep = []
+    for class_ in np.unique(y_windows):
+        idx = np.where(y_windows == class_)[0]
+        idx = rng.permutation(idx) # take the indices of each class and shuffle them
+        keep.append(idx[:int(w_per_class)]) # keep only the first w_per_class indices of each class
+    keep = np.sort(np.concatenate(keep, axis = 0))
+    return X_windows[keep], y_windows[keep]
+
 for seed in [42, 58, 7, 128, 92]: 
     g = set_seed(seed)
-    train_loader, val_loader, test_loader, label_encoder = make_loaders_OPP(X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows, generator = g, verbose = True)
+    if args.w_per_class == "all":
+        X_tr, y_tr = X_windows, y_windows
+    else:
+        X_tr, y_tr = subsample_per_class(X_windows, y_windows, args.w_per_class, seed)
+        print(f"[low-label] w_per_class = {args.w_per_class} | train windows: {len(y_tr)} | class counts: {dict(Counter(y_tr.tolist()))}")
+    train_loader, val_loader, test_loader, label_encoder = make_loaders_OPP(X_tr, y_tr, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows, generator = g, verbose = True)
     
     #  ----------- TRAINING SETUP -----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -234,7 +251,7 @@ for seed in [42, 58, 7, 128, 92]:
     #optimizer = torch.optim.AdamW([{"params": model.encoder.parameters(), "lr": 1e-5},{"params": model.classifier.parameters(), "lr": 3e-4}], weight_decay = 1e-4)
     optimizer = torch.optim.AdamW(filter(lambda param: param.requires_grad, model.parameters()), lr = lr, weight_decay = 0.0)
  #  ----------- TRAINING -----------
-    model_name = f"JEPA_models_pt/{RUN}/model_JEPA_CLA_OPP_fold{args.fold}_seed{seed}.pt"
+    model_name = f"JEPA_models_pt/{OUT}/model_JEPA_CLA_OPP_fold{args.fold}_seed{seed}.pt"
     epoch_history = []
     best_val_loss = float("inf")
     best_val_acc = 0.0
@@ -242,7 +259,7 @@ for seed in [42, 58, 7, 128, 92]:
     best_state = None
     bad_epochs = 0
     prof_out = None
-    with open(f"logs/model_JEPA_CLA_OPP_{RUN}_fold{args.fold}.txt", "a") as log_file:
+    with open(f"logs/model_JEPA_CLA_OPP_{OUT}_fold{args.fold}.txt", "a") as log_file:
         log_file.write(f"\nTRAINING STARTING AT: {datetime.now()}\n")
         log_file.write(f"Model: {model_name} | SEED: {seed}\n")
         log_file.flush()
@@ -315,6 +332,8 @@ for seed in [42, 58, 7, 128, 92]:
             "history": epoch_history,
             "summary": {
                 "lam": float(args.lam),
+                "w_per_class": args.w_per_class,
+                "n_train_windows": int(len(y_tr)),
                 "best_epoch": best_epoch,
                 "best_val_loss": float(best_val_loss),
                 "best_val_acc": float(best_val_acc),
@@ -324,7 +343,7 @@ for seed in [42, 58, 7, 128, 92]:
                 "test_conf_matrix": conf_matrix.tolist()               
             }
         }
-        save_json(args.dataset, args.fold, seed, seed_result, out_dir = f"results_json/{RUN}")
+        save_json(args.dataset, args.fold, seed, seed_result, out_dir = f"results_json/{OUT}")
         print(f"{'-'*90}")
         print(f"Test Results:\n Accuracy: {acc}\n Report:\n {report}\n F1: {f1}\n Confusion Matrix:\n {conf_matrix}")
         log_file.write(f"\nTest Results:\n Accuracy: {acc}\n Report:\n {report}\n F1: {f1}\n Confusion Matrix:\n {conf_matrix}")

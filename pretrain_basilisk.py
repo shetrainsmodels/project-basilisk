@@ -48,7 +48,7 @@ if args.dataset == "OPP":
 else:
     raise ValueError(f"Unknown dataset: {args.dataset}")
 
-X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = False)
+X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = True)
 
 #  ----------------------------------------------------- VALIDATION -----------------------------------------------------
 @torch.no_grad()
