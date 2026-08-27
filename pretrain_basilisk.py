@@ -44,7 +44,7 @@ if args.dataset == "OPP":
 else:
     raise ValueError(f"Unknown dataset: {args.dataset}")
 
-X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True)
+X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = False)
 
 #  ----------------------------------------------------- VALIDATION -----------------------------------------------------
 @torch.no_grad()
@@ -108,7 +108,7 @@ for seed in [42, 58, 7, 128, 92]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
     recon = True
-    lam = 0.0
+    lam = 1
     model = MambaJEPA(config, mask_ratio = 0.33, t_l = 3, use_pe = False, drop = True, recon = recon)
     model.to(device, non_blocking = True)
     # ----------------------
