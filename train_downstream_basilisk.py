@@ -230,8 +230,8 @@ for seed in [42, 58, 7, 128, 92]:
     config = HARMambaConfig()
     model = MambaDownstreamClassifier(config, num_classes)
     model.to(device, non_blocking = True)
-    num_epochs = 60
-    patience = 10
+    num_epochs = 60 if args.w_per_class == "all" else 500   # low-label: an epoch is ~1 optimizer step, so allow many more
+    patience   = 10 if args.w_per_class == "all" else 20    # low-label: val loss is noisier per epoch
     lr = 2e-4 
     
     # LOAD PRETRAINED ENCODER
