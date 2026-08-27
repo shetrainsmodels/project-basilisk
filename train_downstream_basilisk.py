@@ -35,7 +35,11 @@ print(f"Path: {mm.__file__}")
 parser = argparse.ArgumentParser(description = "supervised_mamba")
 parser.add_argument("--dataset", type = str, required = True)
 parser.add_argument("--fold", type = int, required = True)
+parser.add_argument("--lam", type = float, required = True)
 args = parser.parse_args()
+RUN = f"lam{args.lam:g}"
+os.makedirs(f"JEPA_models_pt/{RUN}", exist_ok = True)
+os.makedirs("logs", exist_ok = True)
 if args.dataset == "OPP":
     if args.fold in [1, 2, 3, 4]:
         training_files, validation_files, test_files = data_split_OPP(args.fold)
@@ -47,7 +51,7 @@ else:
 X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = False)
 
 def load_pretrained_encoder(model, device, fold, seed):
-    checkpoint_path = f"JEPA_models_pt/JEPA_model_OPP_fold{fold}_seed{seed}.pt"
+    checkpoint_path = f"JEPA_models_pt/{RUN}/JEPA_model_OPP_fold{fold}_seed{seed}.pt"
 
     state = torch.load(checkpoint_path, map_location = device, weights_only=True)
     encoder_state = {k.replace("target_encoder.", "", 1): v for k,v in state.items() if k.startswith("target_encoder.")}
@@ -230,7 +234,7 @@ for seed in [42, 58, 7, 128, 92]:
     #optimizer = torch.optim.AdamW([{"params": model.encoder.parameters(), "lr": 1e-5},{"params": model.classifier.parameters(), "lr": 3e-4}], weight_decay = 1e-4)
     optimizer = torch.optim.AdamW(filter(lambda param: param.requires_grad, model.parameters()), lr = lr, weight_decay = 0.0)
  #  ----------- TRAINING -----------
-    model_name = f"JEPA_models_pt/model_JEPA_CLA_OPP_fold{args.fold}_seed{seed}.pt"
+    model_name = f"JEPA_models_pt/{RUN}/model_JEPA_CLA_OPP_fold{args.fold}_seed{seed}.pt"
     epoch_history = []
     best_val_loss = float("inf")
     best_val_acc = 0.0
@@ -238,7 +242,7 @@ for seed in [42, 58, 7, 128, 92]:
     best_state = None
     bad_epochs = 0
     prof_out = None
-    with open(f"logs/model_JEPA_CLA_OPP_fold{args.fold}.txt", "a") as log_file:
+    with open(f"logs/model_JEPA_CLA_OPP_{RUN}_fold{args.fold}.txt", "a") as log_file:
         log_file.write(f"\nTRAINING STARTING AT: {datetime.now()}\n")
         log_file.write(f"Model: {model_name} | SEED: {seed}\n")
         log_file.flush()
@@ -310,6 +314,7 @@ for seed in [42, 58, 7, 128, 92]:
             "fold": int(args.fold),
             "history": epoch_history,
             "summary": {
+                "lam": float(args.lam),
                 "best_epoch": best_epoch,
                 "best_val_loss": float(best_val_loss),
                 "best_val_acc": float(best_val_acc),
@@ -319,7 +324,7 @@ for seed in [42, 58, 7, 128, 92]:
                 "test_conf_matrix": conf_matrix.tolist()               
             }
         }
-        save_json(args.dataset, args.fold, seed, seed_result)
+        save_json(args.dataset, args.fold, seed, seed_result, out_dir = f"results_json/{RUN}")
         print(f"{'-'*90}")
         print(f"Test Results:\n Accuracy: {acc}\n Report:\n {report}\n F1: {f1}\n Confusion Matrix:\n {conf_matrix}")
         log_file.write(f"\nTest Results:\n Accuracy: {acc}\n Report:\n {report}\n F1: {f1}\n Confusion Matrix:\n {conf_matrix}")

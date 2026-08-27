@@ -10,9 +10,9 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-if [ -z "$1" ] || [ -z "$2" ]; then
-	echo "Usage: sbatch pretrain_basilisk.slurm <DATASET_NAME> <FOLD_ID>"
-	echo "Example: sbatch pretrain_basilisk.slurm OPP 1"
+if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
+	echo "Usage: sbatch pretrain_basilisk.slurm <DATASET_NAME> <FOLD_ID> <LAM>"
+	echo "Example: sbatch pretrain_basilisk.slurm OPP 1 0.1"
 	exit 1
 fi
 
@@ -25,7 +25,7 @@ nvidia-smi
 source /home/kmercad/myenv/bin/activate
 cd $SLURM_SUBMIT_DIR
 
-python pretrain_basilisk.py --dataset "$1" --fold "$2"
+python pretrain_basilisk.py --dataset "$1" --fold "$2" --lam "$3"
 
 JOB_END=$(date +%s)
 ELAPSE=$((JOB_END-JOB_START))

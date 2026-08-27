@@ -13,9 +13,9 @@
 
 set -euo pipefail
 
-if [ -z "$1" ] || [ -z "$2" ]; then
-	echo "Usage: sbatch train_downstream_basilisk.slurm <DATASET_NAME> <FOLD_ID>"
-	echo "Example: sbatch train_downstream_basilisk.slurm OPP 1"
+if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
+	echo "Usage: sbatch train_downstream_basilisk.slurm <DATASET_NAME> <FOLD_ID> <LAM>"
+	echo "Example: sbatch train_downstream_basilisk.slurm OPP 1 0.1"
 	exit 1
 fi
 
@@ -28,7 +28,7 @@ nvidia-smi
 source /home/kmercad/myenv/bin/activate
 cd "$SLURM_SUBMIT_DIR"
 
-python train_downstream_basilisk.py --dataset "$1" --fold "$2"
+python train_downstream_basilisk.py --dataset "$1" --fold "$2" --lam "$3"
 
 JOB_END=$(date +%s)
 ELAPSE=$((JOB_END-JOB_START))

@@ -35,7 +35,11 @@ print(f"Path: {mm.__file__}")
 parser = argparse.ArgumentParser(description = "J_mamba")
 parser.add_argument("--dataset", type = str, required = True)
 parser.add_argument("--fold", type = int, required = True)
+parser.add_argument("--lam", type = float, required = True)
 args = parser.parse_args()
+RUN = f"lam{args.lam:g}"
+os.makedirs(f"JEPA_models_pt/{RUN}", exist_ok = True)
+os.makedirs("logs", exist_ok = True)
 if args.dataset == "OPP":
     if args.fold in [1, 2, 3, 4]:
         training_files, validation_files, test_files = data_split_OPP(args.fold)
@@ -108,7 +112,7 @@ for seed in [42, 58, 7, 128, 92]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
     recon = True
-    lam = 1
+    lam = args.lam
     model = MambaJEPA(config, mask_ratio = 0.33, t_l = 3, use_pe = False, drop = True, recon = recon)
     model.to(device, non_blocking = True)
     # ----------------------
@@ -151,13 +155,13 @@ for seed in [42, 58, 7, 128, 92]:
     global_step = 0
 
     #  ----------- TRAINING -----------
-    model_name = f"JEPA_models_pt/JEPA_model_OPP_fold{args.fold}_seed{seed}.pt"
+    model_name = f"JEPA_models_pt/{RUN}/JEPA_model_OPP_fold{args.fold}_seed{seed}.pt"
     epoch_history = []
     best_val_loss = float("inf")
     best_epoch = None
     best_state = None
     bad_epochs = 0
-    with open(f"logs/JEPA_training_OPP_fold{args.fold}.txt", "a") as log_file:
+    with open(f"logs/JEPA_training_OPP_{RUN}_fold{args.fold}.txt", "a") as log_file:
         log_file.write(f"\nTRAINING STARTING AT: {datetime.now()}\n")
         log_file.write(f"Model: {model_name} | SEED: {seed}\n")
         log_file.flush()
