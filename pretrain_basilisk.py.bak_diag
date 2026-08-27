@@ -108,7 +108,7 @@ for seed in [42, 58, 7, 128, 92]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = HARMambaConfig()
     recon = True
-    lam = 0.0
+    lam = 0.1
     model = MambaJEPA(config, mask_ratio = 0.33, t_l = 3, use_pe = False, drop = True, recon = recon)
     model.to(device, non_blocking = True)
     # ----------------------
@@ -170,7 +170,7 @@ for seed in [42, 58, 7, 128, 92]:
             grad_stat = {name: {"ratio": [], "cos": []} for name in GROUPS}
 
             loop = tqdm(train_loader, desc = f"Epoch {epoch+1}/{num_epochs}")
-            for batch_idx, (x_batch, _) in enumerate(loop):
+            for _, (x_batch, _) in enumerate(loop):
                 x_batch = x_batch.to(device, non_blocking = True)
 
                 optimizer.zero_grad()
@@ -184,7 +184,7 @@ for seed in [42, 58, 7, 128, 92]:
                     recon_loss = criterion(reconstruction[mask], x_batch[mask])
                     jepa = loss
                     loss = lam * jepa + recon_loss
-                    if batch_idx == 0: # gradient diagnostic: first batch of each epoch, all groups (cost control)
+                    if global_step % 30 == 0: # gradient diagnostic every 30 steps (cost control)
                         for name, layer_level in GROUPS.items():
                             ratio_l, cos = get_grad_vector(jepa, recon_loss, layer_level, lam)
                             grad_stat[name]["ratio"].append(ratio_l);  grad_stat[name]["cos"].append(cos)

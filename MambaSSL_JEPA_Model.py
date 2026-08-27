@@ -165,8 +165,12 @@ class MambaJEPA(nn.Module):
             self.pe_target = None
         #predictor
         self.predictor = PredictorTransformer(config, drop = drop)
+        #reconstruction 
         self.recon = recon
         self.decoder = DecoderModel(config, device=device, dtype=dtype) if recon else None
+        if recon:
+            self.recon_mask_token = nn.Parameter(torch.zeros(1, 1, config.d_model))
+            nn.init.trunc_normal_(self.recon_mask_token, std = 0.02)
 
     #  EMA UPDATE FOR TARGET ENCODER
     @torch.no_grad()
@@ -187,13 +191,39 @@ class MambaJEPA(nn.Module):
 
         tokens_context = self.context_encoder.tokenize(input_sensor1)
         context_input, mask_targets, target_blocks = masking_algorithm_targets(tokens_context, mask_ratio = self.mask_ratio, t_l = self.t_l, generator=None)
+
         # ADD PE
+        #if self.use_pe:
+            #context_input = context_input + self.pe
+        # ADD DROPPING and PE
+        # -------------------------------------------------
+        # RAW / MAE BRANCH
+        # -------------------------------------------------
+        context_input_recon = None
+        if self.recon:
+            mask_token = self.recon_mask_token.expand_as(context_input)
+            recon_input = torch.where(mask_targets.unsqueeze(-1), mask_token, context_input)
+            if self.use_pe:
+                recon_input = recon_input + self.pe
+            # Full sequence goes through Mamba for reconstruction
+            context_input_recon = self.context_encoder.encode_tokens(recon_input)
+
+        # -------------------------------------------------
+        # JEPA BRANCH
+        # -------------------------------------------------
+        jepa_input = context_input
+
         if self.use_pe:
-            context_input = context_input + self.pe
-        # ADD DROPPING MECHANISM
+            jepa_input = context_input + self.pe
+
         if self.drop:
-            context_input = (context_input[~mask_targets]).view(mask_targets.size(0), -1, context_input.size(2))
-        context_embeddings = self.context_encoder.encode_tokens(context_input) 
+            # REMOVE masked positions completely for JEPA
+            visible_input = jepa_input[~mask_targets].view(mask_targets.size(0), -1, jepa_input.size(2))
+        else:
+            visible_input = jepa_input
+
+        context_embeddings = self.context_encoder.encode_tokens(visible_input)
+
 
         # Predictor
         predictions = self.predictor(target_blocks, context_embeddings, mask_targets) # [2B, 3, 384]
@@ -202,7 +232,7 @@ class MambaJEPA(nn.Module):
         index = blocks_cat.unsqueeze(-1).expand(-1, -1, target_embeddings.size(-1))
         targets = torch.gather(targets_emb_2B, 1, index) 
 
-        return target_embeddings, targets, context_embeddings, mask_targets, target_blocks, predictions
+        return target_embeddings, targets, context_embeddings, mask_targets, target_blocks, predictions, context_input_recon
 
 class MLP(nn.Module):
     def __init__(self, config, mlp_ratio = 4):
