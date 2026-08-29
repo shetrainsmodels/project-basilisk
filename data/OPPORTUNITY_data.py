@@ -171,45 +171,52 @@ def load_OPP_loco_data(training_files, validation_files, test_files, verbose = F
 # --------------------------------------------------
 # 2) columns to standardize FIRST TRY ACC AND GYRO
 # --------------------------------------------------
-    scaler = StandardScaler()
     acc_gyro_cols = [axis + offset for offset in range(0, 45, 9) for axis in range(6)]
-    
-    training_data_scaled.iloc[:, acc_gyro_cols] = scaler.fit_transform(training_data_scaled.iloc[:, acc_gyro_cols].values)
-    validation_data_scaled.iloc[:, acc_gyro_cols] = scaler.transform(validation_data_scaled.iloc[:, acc_gyro_cols].values)
+
+    # ----- Stratify TRAIN / VAL (strict LOSO) -----
+    # Pool = all files of the TRAINING subjects (ADL1-4 + ADL5). Split at file level (group_id) into
+    # train (4/5 of the files) and a class-balanced validation set (1/5 of the files).
+    # TEST = all sessions (ADL1-5) of the held-out subject, never enters this pool.
+    combined_pool = pd.concat([validation_data_scaled, training_data_scaled], axis = 0, ignore_index = True)
+    y = combined_pool.iloc[:, -2].values       # Labels
+    groups = combined_pool["group_id"].values  # File id Name
+
+    sgkf = StratifiedGroupKFold(n_splits = 5, shuffle = True, random_state = 42)
+    train_idx, val_idx = next(sgkf.split(combined_pool, y, groups))   # sklearn yields (train_index, test_index)
+
+    new_training_data_scaled = combined_pool.iloc[train_idx].copy().reset_index(drop=True)
+    new_validation_data_scaled = combined_pool.iloc[val_idx].copy().reset_index(drop=True)
+
+    # ----- Standardize ACC/GYRO: statistics fitted on the (new) TRAINING split only -----
+    scaler = StandardScaler()
+    new_training_data_scaled.iloc[:, acc_gyro_cols] = scaler.fit_transform(new_training_data_scaled.iloc[:, acc_gyro_cols].values)
+    new_validation_data_scaled.iloc[:, acc_gyro_cols] = scaler.transform(new_validation_data_scaled.iloc[:, acc_gyro_cols].values)
     test_data_scaled.iloc[:, acc_gyro_cols] = scaler.transform(test_data_scaled.iloc[:, acc_gyro_cols].values)
 
-    # ----- Stratify -----
-    combined_eval = pd.concat([validation_data_scaled, test_data_scaled], axis = 0, ignore_index = True) 
-    y = combined_eval.iloc[:, -2].values       # Labels
-    groups = combined_eval["group_id"].values  # File id Name
-        
-    sgkf = StratifiedGroupKFold(n_splits = 2, shuffle = True, random_state = 42)
-    val_idx, test_idx = next(sgkf.split(combined_eval, y, groups))
-
-    # creation of the new splits for val and test
-    new_validation_data_scaled = combined_eval.iloc[val_idx].copy().reset_index(drop=True)
-    new_test_data_scaled = combined_eval.iloc[test_idx].copy().reset_index(drop=True)
-    
-    print(f"{'-'*20}STRATIY VAL/TEST{'-'*20}")
+    print(f"{'-'*20}STRATIFY TRAIN/VAL (test = held-out subject){'-'*20}")
+    print("Training GROUPS")
+    print(new_training_data_scaled["group_id"].value_counts().sort_index())
     print("Validation GROUPS")
     print(new_validation_data_scaled["group_id"].value_counts().sort_index())
-    print("Test GROUPS")
-    print(new_test_data_scaled["group_id"].value_counts().sort_index(), "\n")   
-    
-    print(f"\n Validation Split Label Proportion")
+    print("Test GROUPS (held-out subject)")
+    print(test_data_scaled["group_id"].value_counts().sort_index(), "\n")
+
+    print("\nTraining Split Label Proportion")
+    print(new_training_data_scaled.iloc[:, -2].value_counts(normalize=True).sort_index())
+    print("Validation Split Label Proportion")
     print(new_validation_data_scaled.iloc[:, -2].value_counts(normalize=True).sort_index())
     print("Test Split Label Proportion")
-    print(new_test_data_scaled.iloc[:, -2].value_counts(normalize=True).sort_index())
+    print(test_data_scaled.iloc[:, -2].value_counts(normalize=True).sort_index())
 
     if verbose:
-        print_post_standardize_stats(training_data_scaled, "TRAIN", acc_gyro_cols)
+        print_post_standardize_stats(new_training_data_scaled, "TRAIN", acc_gyro_cols)
         print_post_standardize_stats(new_validation_data_scaled, "VAL", acc_gyro_cols)
-        print_post_standardize_stats(new_test_data_scaled, "TEST", acc_gyro_cols)
-    
+        print_post_standardize_stats(test_data_scaled, "TEST", acc_gyro_cols)
+
     # ----- Features&Labels -----
-    X_features, y_labels = divide_features_labels(training_data_scaled)
+    X_features, y_labels = divide_features_labels(new_training_data_scaled)
     X_val_features, y_val_labels = divide_features_labels(new_validation_data_scaled)
-    X_test_features, y_test_labels = divide_features_labels(new_test_data_scaled)
+    X_test_features, y_test_labels = divide_features_labels(test_data_scaled)
     if verbose:
         print(f"{'-'*90}")
         print(f"Training features: {X_features.shape} | Training labels: {y_labels.shape}")
