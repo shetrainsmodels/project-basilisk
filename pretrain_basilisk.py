@@ -2,7 +2,8 @@ from pyexpat import model
 import os, sys
 from MambaSSL_JEPA_Model import MambaJEPA, HARMambaConfig
 from data.OPPORTUNITY_data import load_OPP_loco_data, data_split_OPP, make_loaders_OPP
-from test_mamba import test_model 
+from data.PAMAP2_data import load_PAM_loco_data, data_split_PAM, make_loaders_PAM
+from test_mamba import test_model
 import json
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 from mamba_ssm.modules.mamba2 import Mamba2
@@ -37,7 +38,7 @@ parser.add_argument("--dataset", type = str, required = True)
 parser.add_argument("--fold", type = int, required = True)
 parser.add_argument("--lam", type = float, required = True)
 args = parser.parse_args()
-RUN = f"lam{args.lam:g}"
+RUN = f"{args.dataset}_lam{args.lam:g}"     # dataset-prefixed: OPP_lam0.1 / PAM_lam0.1 (never overwrite each other)
 os.makedirs(f"JEPA_models_pt/{RUN}", exist_ok = True)
 os.makedirs("logs", exist_ok = True)
 if args.dataset == "OPP":
@@ -45,10 +46,19 @@ if args.dataset == "OPP":
         training_files, validation_files, test_files = data_split_OPP(args.fold)
     else:
         raise ValueError(f"Fold must be 1, 2, 3 or 4. Got {args.fold}")
+    X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = True)
+    make_loaders = make_loaders_OPP
+    NUM_SENSOR_FEATURES = 45
+elif args.dataset == "PAM":
+    if args.fold in range(1, 9):
+        training_files, validation_files, test_files = data_split_PAM(args.fold)
+    else:
+        raise ValueError(f"PAM fold must be 1..8. Got {args.fold}")
+    X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_PAM_loco_data(training_files, validation_files, test_files, verbose = True, drill = True)
+    make_loaders = make_loaders_PAM
+    NUM_SENSOR_FEATURES = 27
 else:
     raise ValueError(f"Unknown dataset: {args.dataset}")
-
-X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = True)
 
 #  ----------------------------------------------------- VALIDATION -----------------------------------------------------
 @torch.no_grad()
@@ -106,11 +116,11 @@ def get_grad_vector(jepa_loss, raw_loss, layer_param, lam):
 #  ---------------------------------------------------- TRAINING ---------------------------------------------------
 for seed in [42, 58, 7, 128, 92]:
     g = set_seed(seed)
-    train_loader, val_loader, test_loader, label_encoder = make_loaders_OPP(X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows, generator = g, verbose = True)
+    train_loader, val_loader, test_loader, label_encoder = make_loaders(X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows, generator = g, verbose = True)
 
     #  ----------- TRAINING SETUP -----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    config = HARMambaConfig()
+    config = HARMambaConfig(num_sensor_features = NUM_SENSOR_FEATURES)
     recon = True
     lam = args.lam
     model = MambaJEPA(config, mask_ratio = 0.33, t_l = 3, use_pe = False, drop = True, recon = recon)
@@ -155,13 +165,13 @@ for seed in [42, 58, 7, 128, 92]:
     global_step = 0
 
     #  ----------- TRAINING -----------
-    model_name = f"JEPA_models_pt/{RUN}/JEPA_model_OPP_fold{args.fold}_seed{seed}.pt"
+    model_name = f"JEPA_models_pt/{RUN}/JEPA_model_{args.dataset}_fold{args.fold}_seed{seed}.pt"
     epoch_history = []
     best_val_loss = float("inf")
     best_epoch = None
     best_state = None
     bad_epochs = 0
-    with open(f"logs/JEPA_training_OPP_{RUN}_fold{args.fold}.txt", "a") as log_file:
+    with open(f"logs/JEPA_training_{RUN}_fold{args.fold}.txt", "a") as log_file:
         log_file.write(f"\nTRAINING STARTING AT: {datetime.now()}\n")
         log_file.write(f"Model: {model_name} | SEED: {seed}\n")
         log_file.flush()

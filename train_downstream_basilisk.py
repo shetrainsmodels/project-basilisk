@@ -4,7 +4,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from MambaSSL_JEPA_Model import HARMambaConfig, MambaDownstreamClassifier
 from data.OPPORTUNITY_data import load_OPP_loco_data, data_split_OPP, make_loaders_OPP
-from test_mamba import test_model, save_json 
+from data.PAMAP2_data import load_PAM_loco_data, data_split_PAM, make_loaders_PAM
+from test_mamba import test_model, save_json, CLASS_NAMES
 import json
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
 from mamba_ssm.modules.mamba2 import Mamba2
@@ -38,7 +39,7 @@ parser.add_argument("--fold", type = int, required = True)
 parser.add_argument("--lam", type = float, required = True)
 parser.add_argument("--w_per_class", type = str, default = "all")
 args = parser.parse_args()
-RUN = f"lam{args.lam:g}"                                                    # pretrained-encoder folder (shared by all label fractions)
+RUN = f"{args.dataset}_lam{args.lam:g}"                                     # pretrained-encoder folder (dataset-prefixed, shared by all label fractions)
 OUT = RUN if args.w_per_class == "all" else f"{RUN}_n{int(args.w_per_class)}"   # output tag: results/logs/probe .pt
 os.makedirs(f"JEPA_models_pt/{OUT}", exist_ok = True)
 os.makedirs("logs", exist_ok = True)
@@ -47,13 +48,23 @@ if args.dataset == "OPP":
         training_files, validation_files, test_files = data_split_OPP(args.fold)
     else:
         raise ValueError(f"Fold must be 1, 2, 3 or 4. Got {args.fold}")
+    X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = False)
+    make_loaders = make_loaders_OPP
+    NUM_SENSOR_FEATURES = 45
+elif args.dataset == "PAM":
+    if args.fold in range(1, 9):
+        training_files, validation_files, test_files = data_split_PAM(args.fold)
+    else:
+        raise ValueError(f"PAM fold must be 1..8. Got {args.fold}")
+    X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_PAM_loco_data(training_files, validation_files, test_files, verbose = True)
+    make_loaders = make_loaders_PAM
+    NUM_SENSOR_FEATURES = 27
 else:
     raise ValueError(f"Unknown dataset: {args.dataset}")
-
-X_windows, y_windows, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows = load_OPP_loco_data(training_files, validation_files, test_files, verbose = True, drill = False)
+class_names = CLASS_NAMES[args.dataset]
 
 def load_pretrained_encoder(model, device, fold, seed):
-    checkpoint_path = f"JEPA_models_pt/{RUN}/JEPA_model_OPP_fold{fold}_seed{seed}.pt"
+    checkpoint_path = f"JEPA_models_pt/{RUN}/JEPA_model_{args.dataset}_fold{fold}_seed{seed}.pt"
 
     state = torch.load(checkpoint_path, map_location = device, weights_only=True)
     encoder_state = {k.replace("target_encoder.", "", 1): v for k,v in state.items() if k.startswith("target_encoder.")}
@@ -89,7 +100,7 @@ def validate_model(model, val_loader, device, criterion):
         all_preds.extend(predictions.cpu().numpy())
         all_labels.extend(y_batch.cpu().numpy())
 
-    report = classification_report(all_labels, all_preds, target_names = ["STAND", "WALK", "SIT", "LIE"])
+    report = classification_report(all_labels, all_preds, target_names = class_names)
     return total_loss / total_samples, total_correct / total_samples, report
 # --------------------------------
 @torch.no_grad()
@@ -222,12 +233,13 @@ for seed in [42, 58, 7, 128, 92]:
     else:
         X_tr, y_tr = subsample_per_class(X_windows, y_windows, args.w_per_class, seed)
         print(f"[low-label] w_per_class = {args.w_per_class} | train windows: {len(y_tr)} | class counts: {dict(Counter(y_tr.tolist()))}")
-    train_loader, val_loader, test_loader, label_encoder = make_loaders_OPP(X_tr, y_tr, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows, generator = g, verbose = True)
-    
+    train_loader, val_loader, test_loader, label_encoder = make_loaders(X_tr, y_tr, X_validation_windows, y_validation_windows, X_test_windows, y_test_windows, generator = g, verbose = True)
+
     #  ----------- TRAINING SETUP -----------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_classes = int(len(label_encoder.classes_))
-    config = HARMambaConfig()
+    assert num_classes == len(class_names), f"{num_classes} classes in training labels but {len(class_names)} class names for {args.dataset}"
+    config = HARMambaConfig(num_sensor_features = NUM_SENSOR_FEATURES)
     model = MambaDownstreamClassifier(config, num_classes)
     model.to(device, non_blocking = True)
     num_epochs = 60 if args.w_per_class == "all" else 500   # low-label: an epoch is ~1 optimizer step, so allow many more
@@ -251,7 +263,7 @@ for seed in [42, 58, 7, 128, 92]:
     #optimizer = torch.optim.AdamW([{"params": model.encoder.parameters(), "lr": 1e-5},{"params": model.classifier.parameters(), "lr": 3e-4}], weight_decay = 1e-4)
     optimizer = torch.optim.AdamW(filter(lambda param: param.requires_grad, model.parameters()), lr = lr, weight_decay = 0.0)
  #  ----------- TRAINING -----------
-    model_name = f"JEPA_models_pt/{OUT}/model_JEPA_CLA_OPP_fold{args.fold}_seed{seed}.pt"
+    model_name = f"JEPA_models_pt/{OUT}/model_JEPA_CLA_{args.dataset}_fold{args.fold}_seed{seed}.pt"
     epoch_history = []
     best_val_loss = float("inf")
     best_val_acc = 0.0
@@ -259,7 +271,7 @@ for seed in [42, 58, 7, 128, 92]:
     best_state = None
     bad_epochs = 0
     prof_out = None
-    with open(f"logs/model_JEPA_CLA_OPP_{OUT}_fold{args.fold}.txt", "a") as log_file:
+    with open(f"logs/model_JEPA_CLA_{OUT}_fold{args.fold}.txt", "a") as log_file:
         log_file.write(f"\nTRAINING STARTING AT: {datetime.now()}\n")
         log_file.write(f"Model: {model_name} | SEED: {seed}\n")
         log_file.flush()
@@ -325,7 +337,7 @@ for seed in [42, 58, 7, 128, 92]:
         log_file.write(f"TRAINING ENDING AT: {datetime.now()}\n")                           
         
         #  ----------- TEST -----------         
-        acc, report, f1, conf_matrix = test_model(model, test_loader, device)
+        acc, report, f1, conf_matrix = test_model(model, test_loader, device, class_names = class_names)
         seed_result = {
             "seed": int(seed),
             "fold": int(args.fold),

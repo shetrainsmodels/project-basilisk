@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=FT_JEPA_mamba_OPP
-#SBATCH --partition=contrib-gpuq
+#SBATCH --job-name=lpft_basilisk
+#SBATCH --partition=gpuq
 #SBATCH --qos=gpu
 #SBATCH --gres=gpu:A100.80gb:1
 #SBATCH --ntasks=1

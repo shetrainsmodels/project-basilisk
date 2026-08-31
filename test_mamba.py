@@ -5,11 +5,22 @@ import torch
 import json
 import os
 
+# Class names in LabelEncoder order (sorted raw label ids) for each dataset:
+#   OPP locomotion ids 1, 2, 4, 5 -> STAND, WALK, SIT, LIE
+#   PAM activity ids   1, 2, 3, 4 -> LIE, SIT, STAND, WALK
+CLASS_NAMES = {
+    "OPP": ["STAND", "WALK", "SIT", "LIE"],
+    "PAM": ["LIE", "SIT", "STAND", "WALK"],
+}
+
 @torch.no_grad()
-def test_model(model, test_loader, device):
+def test_model(model, test_loader, device, class_names = None):
     '''
     Runs inference on the test set and computes evaluation metrics.
+    class_names: per-class names in LabelEncoder order (default: OPP names, unchanged behaviour).
     '''
+    if class_names is None:
+        class_names = CLASS_NAMES["OPP"]
     model.eval()
     all_preds = []
     all_labels = []
@@ -23,7 +34,7 @@ def test_model(model, test_loader, device):
         all_labels.extend(y_batch.numpy(force = True)) # move to CPU
 
     acc = accuracy_score(all_labels, all_preds)    
-    report = classification_report(all_labels, all_preds, target_names = ["STAND", "WALK", "SIT", "LIE"], output_dict = True)
+    report = classification_report(all_labels, all_preds, target_names = class_names, output_dict = True)
     f1 = f1_score(all_labels, all_preds, average = "macro") # macro: F1 avg equally among classes, for general performance
     conf_matrix = confusion_matrix(all_labels, all_preds)
     return acc, report, f1, conf_matrix

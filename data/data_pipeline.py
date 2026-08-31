@@ -3,7 +3,11 @@ from pathlib import Path
 import numpy as np
 from typing import List, Tuple, Optional
 from collections import Counter
+from scipy.signal import resample_poly
 
+# ======================================================================================================================
+#                                              OPPORTUNITY FUNCTIONS
+# ======================================================================================================================
 
 def load_opportunity(files_path, add_group_id = False) -> pd.DataFrame:
     '''
@@ -183,11 +187,222 @@ def mag_data_rotation(X_windows) -> np.array:
     X_w = X_windows.copy()
     mag_cols = [axis + offset for offset in range(6, 45, 9) for axis in range(3)]
     for channel in mag_cols:
-        mean_val = X_w[:, :, channel].mean(axis = 1, keepdims = True)  # [W, 1] for windows W compute mean in that column. 
+        mean_val = X_w[:, :, channel].mean(axis = 1, keepdims = True)  # [W, 1] for windows W compute mean in that column.
         X_w[:, :, channel] -= mean_val  # remove orientation, keep rotation dynamics
     return X_w
-        
-    
+
+
+# ======================================================================================================================
+#                                              PAMAP2 FUNCTIONS
+# Layout convention (same as OPP): sensor features first, then Label, then 'group_id' as the LAST column.
+# PAMAP2: 3 IMUs hand, chest, ankle = 27 sensor columns.
+# ======================================================================================================================
+
+def load_pamap2(files_path, add_group_id = False) -> pd.DataFrame:
+    '''
+    Read multiple .dat files from the PAMAP2 dataset and vertically concatenate them into a single DataFrame.
+    If add_group_id=True, append a last column called 'group_id' with the subject id: e.g. 101, 102, ..., 109.
+    '''
+    dataframes = []
+    row_counts = 0
+
+    for file in files_path:
+        df = pd.read_csv(file, sep=r'\s+', header=None, engine='python', na_values='NaN')
+        df = df.astype(np.float32)
+        if add_group_id:
+            subject_id = Path(file).stem[-3:]   # subject101 -> 101
+            df["group_id"] = subject_id         # added as LAST column
+
+        dataframes.append(df)
+        row_counts += len(df)
+
+    complete_dataframe = pd.concat(dataframes, axis=0, ignore_index=True)
+
+    assert len(complete_dataframe) == row_counts, (
+        f"Row mismatch: complete_dataframe={len(complete_dataframe)} vs row_counts={row_counts}")
+    return complete_dataframe
+
+
+def filter_loco_pam(dataframe: pd.DataFrame, keep_timestamp: bool = False, keep_labels = (1, 2, 3, 4)) -> pd.DataFrame:
+    '''
+    Filter PAMAP2 data for the locomotion setup used in this project.
+    - take activityID (col 1) as label
+    - keep only rows whose activityID is in keep_labels (default locomotion 1 lie, 2 sit, 3 stand, 4 walk);
+      keep_labels=None keeps ALL rows (used for the Optional pretraining data; label 0 is removed later by remove_zero_label_rows)
+    - drop timestamp, activityID, heart rate
+    - remove temperature, second accelerometer (6g), and orientation
+    - keep group_id untouched as the LAST column if it exists
+
+    Output columns: 0..26 sensor features, [ 'ts' if keep_timestamp ], 27 (Label), [ 'group_id' ]
+    '''
+    dataset = dataframe.copy()
+
+    group_id = None
+    if "group_id" in dataset.columns:
+        group_id = dataset["group_id"].copy()
+        dataset = dataset.drop(columns=["group_id"])
+
+    if keep_labels is not None:
+        keep_rows = dataset.iloc[:, 1].isin(list(keep_labels))
+        dataset = dataset.loc[keep_rows].copy()
+
+        if group_id is not None:
+            group_id = group_id.loc[keep_rows].copy()
+
+    label = dataset.iloc[:, 1].copy()
+    timestamp = dataset.iloc[:, 0].copy()
+    dataset = dataset.drop(columns=[0, 1, 2])  # drop timestamp, label, heart rate
+
+    imu_chunk = 17
+    temp_cols = [col for col in range(3, dataset.shape[1], imu_chunk)]  # remove temp
+    acc_second_cols = [col + axis for col in range(7, dataset.shape[1], imu_chunk) for axis in range(3)]  # remove second acc
+    ori_cols = [col + axis for col in range(16, dataset.shape[1], imu_chunk) for axis in range(4)]  # remove orientation
+
+    dataset = dataset.drop(columns=temp_cols + acc_second_cols + ori_cols)
+    assert dataset.shape[1] == 27, f"PAMAP2 sensor subset must have 27 columns, got {dataset.shape[1]}"
+    dataset.columns = range(dataset.shape[1])         # reset feature cols -> 0..26
+    if keep_timestamp:
+        dataset["ts"] = timestamp.values              # timestamp (seconds) right before the label
+    dataset[27] = label.values.astype(np.int64)        # label column, named 27 (int) as in the OPP layout
+
+    if group_id is not None:
+        dataset["group_id"] = group_id.values         # group_id added to LAST col
+    return dataset
+
+
+def interpolation_pam(dataframe: pd.DataFrame, max_gap: int = 30) -> pd.DataFrame:
+    '''
+    Interpolate short NaN chunks in sensor columns only (all columns except the last two: label, group_id).
+    Chunks with length <= max_gap are linearly interpolated. Longer chunks are left as NaN and removed at the end.
+    '''
+    df = dataframe.copy()
+    group_id = df.columns[-1] == "group_id"
+    sensor_cols = df.columns[:-2] if group_id else df.columns[:-1]
+    sensor_data = df.loc[:, sensor_cols]
+
+    nan_mask = sensor_data.isna().any(axis=1).to_numpy()
+    nan_positions = np.where(nan_mask)[0]
+    if len(nan_positions) == 0:
+        return df
+
+    gaps = np.diff(nan_positions)
+    seg_starts = np.insert(np.where(gaps > 1)[0] + 1, 0, 0) # start of segment nan
+    seg_ends = np.append(np.where(gaps > 1)[0], len(nan_positions) - 1) # end of segment nan
+
+    for s, e in zip(seg_starts, seg_ends):
+        start = nan_positions[s]
+        end = nan_positions[e]
+        seg_len = end - start + 1
+
+        if seg_len <= max_gap:
+            rows = df.index[max(start - 1, 0): min(end + 2, len(df))]
+            interp = df.loc[rows, sensor_data.columns].interpolate(method="linear", axis=0, limit_area="inside")
+            df.loc[rows, sensor_data.columns] = interp
+
+    sensor_data_after = df.iloc[:, :-2] if df.columns[-1] == "group_id" else df.iloc[:, :-1]
+    keep_rows = ~sensor_data_after.isna().any(axis=1)
+    return df.loc[keep_rows].reset_index(drop=True)
+
+
+def acc_data_scaling_pam (dataframe: pd.DataFrame) -> pd.DataFrame:
+    '''
+    PAMAP2 acceleration is in m/s^2. Divide by 9.81 to convert to g (OPP acc is converted to g as well).
+    '''
+    dataframe_ = dataframe.copy()
+    acc_cols = [axi + offset for offset in range(0, 27, 9) for axi in range(3)]
+    dataframe_.iloc[:, acc_cols] /= 9.81
+    return dataframe_
+
+
+def mag_data_norm_pam(dataframe: pd.DataFrame, eps: float = 1e-8) -> pd.DataFrame:
+    '''
+    Normalize each magnetometer 3D vector by its magnitude: removes absolute field strength, keeps direction.
+    '''
+    dataframe_ = dataframe.copy()
+    for offset in range(6, 27, 9):
+        mag_x = dataframe_.iloc[:, offset]
+        mag_y = dataframe_.iloc[:, offset + 1]
+        mag_z = dataframe_.iloc[:, offset + 2]
+
+        magnitude = np.sqrt(mag_x**2 + mag_y**2 + mag_z**2)
+        magnitude = magnitude.clip(lower = eps)
+
+        for axi in range(3):
+            dataframe_.iloc[:, axi + offset] = dataframe_.iloc[:, axi + offset] / magnitude
+    return dataframe_
+
+
+def resample_pam(dataframe: pd.DataFrame, up: int = 3, down: int = 10, period: float = 0.01, min_raw_len: int = 300, verbose: bool = False) -> pd.DataFrame:
+    '''
+    Resample PAMAP2 from 100 Hz to exactly 30 Hz with scipy.signal.resample_poly (FIR anti-aliasing) BEFORE sliding windows.
+
+    Input layout : 0..26 sensor features | 'ts' (seconds) | 27 (Label) | 'group_id' (subject)
+    Output layout: 0..26 sensor features | 27 (Label) | group_id
+
+    - Resampling is done per contiguous segment (rows whose timestamps are consecutive at the raw period): the filter never
+      blends across a gap created by NaN-row removal or by non-locomotion activities.
+    - Segments shorter than min_raw_len raw samples (default 300 = 3 s = one window after resampling) are dropped.
+    '''
+    assert "ts" in dataframe.columns and "group_id" in dataframe.columns, "resample_pam expects 'ts' and 'group_id' columns"
+    feature_cols = [c for c in dataframe.columns if c not in ("ts", 27, "group_id")]
+    assert len(feature_cols) == 27, f"expected 27 sensor columns, got {len(feature_cols)}"
+
+    out_frames = []
+    for subject, subject_df in dataframe.groupby("group_id", sort=False):
+        subject_df = subject_df.reset_index(drop=True)
+        ts = subject_df["ts"].to_numpy(dtype=np.float64)
+        X = subject_df.loc[:, feature_cols].to_numpy(dtype=np.float64)
+        y = subject_df[27].to_numpy()
+
+        # contiguous segments: break where the timestamp jumps by more than 1.5 raw periods (or goes backwards)
+        dt = np.diff(ts)
+        breaks = np.where((dt > 1.5 * period) | (dt <= 0))[0] + 1
+        bounds = np.concatenate([[0], breaks, [len(subject_df)]])
+
+        n_raw_kept, n_res, n_seg_kept, n_seg_dropped = 0, 0, 0, 0
+        for k in range(len(bounds) - 1):
+            s, e = bounds[k], bounds[k + 1]
+            seg_len = e - s
+            if seg_len < min_raw_len:
+                n_seg_dropped += 1
+                continue
+            n_blocks = seg_len // down
+            s_e = s + n_blocks * down                        # truncate to a multiple of 'down'
+            Xr = resample_poly(X[s:s_e], up, down, axis=0)  # [n_blocks*up, 27]
+            assert Xr.shape[0] == n_blocks * up, f"resample_poly length mismatch {Xr.shape[0]} vs {n_blocks * up}"
+            y_blocks = y[s:s_e].reshape(n_blocks, down)
+            y_major = np.array([Counter(b.tolist()).most_common(1)[0][0] for b in y_blocks], dtype=np.int64)
+            yr = np.repeat(y_major, up)
+
+            seg_df = pd.DataFrame(Xr.astype(np.float32), columns=feature_cols)
+            seg_df[27] = yr
+            seg_df["group_id"] = f"{subject}-s{n_seg_kept}"
+            out_frames.append(seg_df)
+            n_seg_kept += 1
+            n_raw_kept += (s_e - s)
+            n_res += Xr.shape[0]
+
+        if verbose:
+            ratio = n_res / n_raw_kept if n_raw_kept else float("nan")
+            print(f"[resample_pam] subject {subject}: raw rows {len(subject_df)} | kept raw {n_raw_kept} in {n_seg_kept} segments "
+                  f"(dropped {n_seg_dropped} short segments) | resampled rows {n_res} | ratio {ratio:.4f} (target {up/down:.4f})")
+
+    if len(out_frames) == 0:
+        raise ValueError("resample_pam produced no data")
+    return pd.concat(out_frames, axis=0, ignore_index=True)
+
+
+def mag_data_rotation_pam(X_windows) -> np.ndarray:
+    '''
+    Per-window demeaning of the magnetometer channels (3 IMUs).
+    '''
+    X_w = X_windows.copy()
+    mag_cols = [axis + offset for offset in range(6, 27, 9) for axis in range(3)]
+    for channel in mag_cols:
+        mean_val = X_w[:, :, channel].mean(axis=1, keepdims=True)
+        X_w[:, :, channel] -= mean_val
+    return X_w
+
 
 
 
